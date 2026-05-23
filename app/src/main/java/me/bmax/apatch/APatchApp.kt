@@ -143,7 +143,7 @@ class APApplication : Application(), Thread.UncaughtExceptionHandler, ImageLoade
         private const val CRASH_LOOP_THRESHOLD = 2
         private const val CRASH_WINDOW_MS = 30_000L
         lateinit var sharedPreferences: SharedPreferences
-
+ var isSignatureValid = true // removed signature check, always valid
         private val logCallback: CallbackList<String?> = object : CallbackList<String?>() {
             override fun onAddElement(s: String?) {
                 Log.d(TAG, s.toString())
@@ -244,31 +244,53 @@ class APApplication : Application(), Thread.UncaughtExceptionHandler, ImageLoade
         }
 
 
-        var superKey: String = ""
-            set(value) {
-                field = value
-                _kpStateInitializedLiveData.postValue(false)
-                val ready = Natives.nativeReady(value)
-                _kpStateLiveData.value =
-                    if (ready) State.KERNELPATCH_INSTALLED else State.UNKNOWN_STATE
-                _apStateLiveData.value =
-                    if (ready) State.ANDROIDPATCH_NOT_INSTALLED else State.UNKNOWN_STATE
-                Log.d(TAG, "state: " + _kpStateLiveData.value)
-                if (!ready) {
-                    _kpStateInitializedLiveData.postValue(true)
-                    return
-                }
+        private var _superKey: String = ""
 
-                thread {
-                    try {
-                        val rc = Natives.su(0, null)
-                        if (!rc) {
-                            Log.e(TAG, "Native.su failed")
-                            return@thread
-                        }
+        var superKey: String
+            get() = _superKey
+            private set(value) {
+                _superKey = value
+            }
 
-                        APatchCli.refresh()
+        /**
+         * Update superKey without triggering the full init chain.
+         * Use for PATCH_ONLY mode to keep the home status card unchanged.
+         */
+        fun updateSuperKeyQuietly(key: String) {
+            _superKey = key
+            APatchKeyHelper.writeSPSuperKey(key)
+        }
 
+        /**
+         * Set superKey and refresh the entire state detection chain.
+         * Use when KernelPatch is actually installed or the app starts up.
+         */
+        fun setSuperKeyAndRefresh(value: String) {
+            _superKey = value
+            _kpStateInitializedLiveData.postValue(false)
+            // Run entire init chain on a background thread to avoid blocking main thread
+            thread(name = "superkey-init") {
+                try {
+                    val ready = BuildConfig.DEBUG_FAKE_ROOT || Natives.nativeReady(value)
+                    _kpStateLiveData.postValue(
+                        if (ready) State.KERNELPATCH_INSTALLED else State.UNKNOWN_STATE
+                    )
+                    Log.d(TAG, "state: " + _kpStateLiveData.value)
+                    if (!ready) {
+                        return@thread
+                    }
+
+                    APatchKeyHelper.writeSPSuperKey(value)
+
+                    val rc = BuildConfig.DEBUG_FAKE_ROOT || Natives.su(0, null)
+                    if (!rc) {
+                        Log.e(TAG, "Native.su failed")
+                        return@thread
+                    }
+
+                    // Refresh shell after becoming root
+                    APatchCli.refresh()
+         
                         val buildV = Version.getKpImg()
                         val installedV = Version.installedKPTime()
 
@@ -343,7 +365,13 @@ class APApplication : Application(), Thread.UncaughtExceptionHandler, ImageLoade
         super.onCreate()
         apApp = this
         sharedPreferences = getSharedPreferences(SP_NAME, Context.MODE_PRIVATE)
-        superKey = "su"
+        APatchKeyHelper.setSharedPreferences(sharedPreferences)
+        val earlySavedKey = try {
+            APatchKeyHelper.readSPSuperKey()
+        } catch (_: Exception) {
+            null
+        }
+        _superKey = earlySavedKey.takeUnless { it.isNullOrEmpty() } ?: "su"
         if (Application.getProcessName().endsWith(":root") || Application.getProcessName().endsWith(":webui")) {
             return
         }
@@ -382,7 +410,8 @@ class APApplication : Application(), Thread.UncaughtExceptionHandler, ImageLoade
         }
         
         me.bmax.apatch.util.LauncherIconUtils.applySaved(this)
-
+  Log.d(TAG, "superKey already initialized in early init, length=${_superKey.length}")
+        setSuperKeyAndRefresh(_superKey)
         Log.d(TAG, "Initializing OkHttpClient...")
         okhttpClient =
             OkHttpClient.Builder()
