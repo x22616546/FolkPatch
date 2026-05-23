@@ -43,12 +43,13 @@ import java.io.StringReader
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-
+import android.os.Environment
 import me.bmax.apatch.util.getFileNameFromUri
 import me.bmax.apatch.util.ModuleBackupUtils
 import me.bmax.apatch.util.SafeUriResolver
 import me.bmax.apatch.ui.screen.selectedKPImg
 import me.bmax.apatch.ui.screen.selectedBootImage
+import kotlinx.coroutines.withContext
 
 private const val TAG = "PatchViewModel"
 
@@ -176,7 +177,7 @@ class PatchesViewModel : ViewModel() {
                 if (kimgInfo.patched) {
                     val superkey = ini["kpimg"]?.getOrDefault("superkey", "") ?: ""
                     kpimgInfo.superKey = superkey
-                    if (superkey.isNotEmpty()) {
+                   if (checkSuperKeyValidation(superkey)) {
                         this.superkey = superkey
                     }
                     var kpmNum = kernel["extra_num"]?.toInt()
@@ -219,6 +220,9 @@ class PatchesViewModel : ViewModel() {
         } else {
             error += result.err.joinToString("\n")
         }
+    }
+ val checkSuperKeyValidation: (superKey: String) -> Boolean = { superKey ->
+        superKey.length in 8..63 && superKey.all { it.isLetterOrDigit() } && superKey.any { it.isDigit() } && superKey.any { it.isLetter() }
     }
 
     fun copyAndParseBootimg(uri: Uri) {
@@ -536,7 +540,8 @@ class PatchesViewModel : ViewModel() {
             val superkey = if (useKey && this@PatchesViewModel.superkey.isNotEmpty()) {
                 this@PatchesViewModel.superkey
             } else {
-                "su"
+               val chars = ('a'..'z') + ('A'..'Z') + ('0'..'9')
+                (1..16).map { chars.random() }.joinToString("")
             }
 
             if (mode == PatchMode.PATCH_AND_INSTALL || mode == PatchMode.INSTALL_TO_NEXT_SLOT) {
@@ -623,6 +628,9 @@ class PatchesViewModel : ViewModel() {
                 logs.add("****************************")
                 patching = false
                 return@launch
+            }
+     withContext(Dispatchers.Main) {
+                APApplication.updateSuperKeyQuietly(superkey)
             }
 
             if (mode == PatchMode.PATCH_AND_INSTALL) {
